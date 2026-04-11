@@ -1,40 +1,20 @@
-# xv6-threads
+# Multithreaded File Management System in xv6
 
-This is a copy of the [xv6 repository](https://github.com/mit-pdos/xv6-public) which implements real kernel threads in xv6, including the addition of clone and join functions which create the foundation for a thread library that defines the thread_create, thread_join, lock_init, lock_acquire, and lock_release functions.
+## Overview
+This project implements a multithreaded file management system in user space for the xv6 operating system. It focuses on safe concurrency using a custom synchronization architecture. It is built on top of the joeylemon/xv6-threads repository, utilizing the underlying clone system calls and lock_t spinlocks.
 
-This project was assigned in COSC361 Operating Systems taught by Dr. Micah Beck, as an assignment from the [OSTEP](https://github.com/remzi-arpacidusseau/ostep-projects) textbook.
+## Features Implemented
+- **Concurrent File Reading:** Multiple threads can read a file simultaneously using a Reader-Writer lock without blocking each other.
+- **Exclusive File Writing:** Ensures only one thread can write at a time, preventing data corruption.
+- **File Metadata Extraction:** Displays file size, inode number, and type using the xv6 stat() system call.
+- **Thread-Safe Auditing:** Uses a console_lock to ensure logs and outputs do not overlap.
+- **Interactive Input:** Accepts filenames and text input from the user via the xv6 shell.
 
-## Changes to implement feature
+## Files Created & Modified
+- **filemanager.c:** Core program containing Reader-Writer lock (rwlock_t), thread functions, and main execution logic.
+- **Makefile:** Added _filemanager to UPROGS and updated compiler settings.
+- **README:** Created a dummy file to satisfy mkfs dependency for fs.img generation.
 
-### Makefile
-The makefile had to be edited to add the new user programs to test the creation of threads and the concurrent execution of code. The forktest program had to be removed to get rid of errors involving malloc.
-
-### defs.h
-The declarations for clone and join were created in this file.
-
-### proc.c
-The code definitions for clone and join were added to this file. The clone function sets up a new process with the given stack arguments, and the join function scans the process table looking for a zombie child and clears them out.
-
-### proc.h
-A new property was added to the process data structure to mark the address of the thread stack, titled *threadstack.
-
-### syscall.c
-The declarations for the new functions sys_clone() and sys_join() were added to this file.
-
-### syscall.h
-This system call numbers were assigned to the new functions sys_clone() and sys_join().
-
-### sysproc.c
-This file contains the definitions of the sys_clone() and sys_join() functions which call the definitions in proc.c.
-
-### user.h
-The declarations for the new system calls clone() and join() were added to this file, as well as the new functions thread_create(), thread_join(), lock_init(), lock_acquire(), and lock_release(). A new structure was created to define a lock.
-
-### ulib.c
-The definitions for the new functions thread_create(), thread_join(), lock_init(), lock_acquire(), and lock_release() were added to this file.
-
-### usys.S
-The declarations for the new functions clone() and join() were added to this file.
-
-### testthreads.c
-This user program tests the creation of three different threads and their usage of locks to ensure concurrency is working and thread safety is achieved via locks.
+## How to Build and Run
+1. Compile: 'make clean && make qemu'
+2. Run inside xv6: '$ filemanager'
