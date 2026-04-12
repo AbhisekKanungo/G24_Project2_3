@@ -1,11 +1,14 @@
 CC = gcc
 CFLAGS = -Wall -pthread
-TARGET = file_manager
+TARGETS = daemon client
 
-all: $(TARGET)
+all: $(TARGETS)
 
-$(TARGET): filemanager.c
-	$(CC) filemanager.c -o $(TARGET) $(CFLAGS)
+daemon: file_daemon.c common.h
+	$(CC) file_daemon.c -o daemon $(CFLAGS)
+
+client: client.c common.h
+	$(CC) client.c -o client $(CFLAGS)
 
 clean:
-	rm -f $(TARGET) system.log report.txt backup.txt final_report.txt
+	rm -f daemon client system.log
