@@ -7,7 +7,8 @@
 #include <fcntl.h>
 #include <time.h>
 #include <signal.h>
-
+#include <sys/msg.h>
+#include <sys/ipc.h>
 /* --- GLOBAL SYNCHRONIZATION OBJECTS --- */
 // Feature 1 & 2: RW Lock allows multiple concurrent readers OR one exclusive writer
 pthread_rwlock_t file_rwlock; 
@@ -17,12 +18,57 @@ pthread_mutex_t log_mutex;
 /* --- DATA STRUCTURES --- */
 typedef enum { OP_READ, OP_WRITE, OP_DELETE, OP_RENAME, OP_COPY, OP_META } OpType;
 
+/* --- REGISTRY & IPC STRUCTURES --- */
+
+// The Dynamic Registry Node
+typedef struct FileNode {
+    char filename[256];
+    pthread_rwlock_t rwlock;   // Fine-grained lock for THIS file only
+    struct FileNode *next;
+} FileNode;
+
+// The Message Packet for IPC
+typedef struct {
+    long mtype;                // Required for msgrcv (can be used for priority)
+    int client_pid;            // To identify the sender
+    int op;                    // OpType (READ, WRITE, etc.)
+    char filename[256];
+    char data[1024];           // payload for WRITE or destination for COPY
+} MsgPacket;
+
+// Updated ThreadArgs for the worker
 typedef struct {
     int thread_id;
-    OpType op;
+    int op;
     char filename[256];
-    char arg2[1024]; 
+    char arg2[1024];
+    pthread_rwlock_t *lock_ptr; // Pointer to the SPECIFIC lock in the registry
 } ThreadArgs;
+FileNode *registry_head = NULL;
+pthread_mutex_t registry_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+pthread_rwlock_t* get_file_lock(const char *fname) {
+    pthread_mutex_lock(&registry_mutex);
+    
+    FileNode *curr = registry_head;
+    while (curr) {
+        if (strcmp(curr->filename, fname) == 0) {
+            pthread_mutex_unlock(&registry_mutex);
+            return &(curr->rwlock);
+        }
+        curr = curr->next;
+    }
+
+    // If not found, create a new Node (Dynamic Allocation)
+    FileNode *new_node = malloc(sizeof(FileNode));
+    strncpy(new_node->filename, fname, 255);
+    pthread_rwlock_init(&(new_node->rwlock), NULL);
+    new_node->next = registry_head;
+    registry_head = new_node;
+
+    pthread_mutex_unlock(&registry_mutex);
+    return &(new_node->rwlock);
+}
 
 /* --- LOGGING SYSTEM (Feature 8: Auditing) --- */
 void log_event(int t_id, const char *msg) {
@@ -58,7 +104,7 @@ void* file_worker(void* arguments) {
             snprintf(log_msg, sizeof(log_msg), "START: Write to %s", args->filename);
             log_event(args->thread_id, log_msg);
             
-            pthread_rwlock_wrlock(&file_rwlock);
+            pthread_rwlock_wrlock(args->lock_ptr);
             fd = open(args->filename, O_WRONLY | O_CREAT | O_TRUNC, 0644);
             if (fd >= 0) {
                 write(fd, args->arg2, strlen(args->arg2));
@@ -72,7 +118,7 @@ void* file_worker(void* arguments) {
                 snprintf(log_msg, sizeof(log_msg), "DONE: Write (FAILED)");
             }
             sleep(1); 
-            pthread_rwlock_unlock(&file_rwlock);
+            pthread_rwlock_unlock(args->lock_ptr);
             log_event(args->thread_id, log_msg);
             break;
 
@@ -80,7 +126,7 @@ void* file_worker(void* arguments) {
             snprintf(log_msg, sizeof(log_msg), "START: Read of %s", args->filename);
             log_event(args->thread_id, log_msg);
             
-            pthread_rwlock_rdlock(&file_rwlock);
+            pthread_rwlock_rdlock(args->lock_ptr);
             fd = open(args->filename, O_RDONLY);
             if (fd >= 0) {
                 // Use a local buffer to avoid thread interference
@@ -105,31 +151,31 @@ void* file_worker(void* arguments) {
             
             // This sleep ensures the threads overlap long enough for you to see it
             sleep(2); 
-            pthread_rwlock_unlock(&file_rwlock);
+            pthread_rwlock_unlock(args->lock_ptr);
             log_event(args->thread_id, log_msg);
             break;
 	case OP_DELETE:
     	    snprintf(log_msg, sizeof(log_msg), "START: Delete %s", args->filename);
     	    log_event(args->thread_id, log_msg);
-    	    pthread_rwlock_wrlock(&file_rwlock);
+    	    pthread_rwlock_wrlock(args->lock_ptr);
     	if (unlink(args->filename) == 0) 
         	snprintf(log_msg, sizeof(log_msg), "DONE: Delete %s (SUCCESS)", args->filename);
     	else 
      		snprintf(log_msg, sizeof(log_msg), "DONE: Delete %s (FAILED)", args->filename);
-    	    pthread_rwlock_unlock(&file_rwlock);
+    	    pthread_rwlock_unlock(args->lock_ptr);
     	    log_event(args->thread_id, log_msg);
     	    break;
         case OP_META: // Feature 6: Metadata Display
             snprintf(log_msg, sizeof(log_msg), "START: Meta of %s", args->filename);
             log_event(args->thread_id, log_msg);
             
-            pthread_rwlock_rdlock(&file_rwlock);
+            pthread_rwlock_rdlock(args->lock_ptr);
             if (stat(args->filename, &st) == 0) {
                 printf("[Thread-%d Info] %s: Size=%ld bytes, Inode=%ld\n", args->thread_id, args->filename, st.st_size, st.st_ino);
                 snprintf(log_msg, sizeof(log_msg), "DONE: Meta (SUCCESS)");
             } else snprintf(log_msg, sizeof(log_msg), "DONE: Meta (FAILED)");
             
-            pthread_rwlock_unlock(&file_rwlock);
+            pthread_rwlock_unlock(args->lock_ptr);
             log_event(args->thread_id, log_msg);
             break;
 
@@ -137,7 +183,7 @@ void* file_worker(void* arguments) {
             snprintf(log_msg, sizeof(log_msg), "START: Copy %s to %s", args->filename, args->arg2);
             log_event(args->thread_id, log_msg);
             
-            pthread_rwlock_rdlock(&file_rwlock);
+            pthread_rwlock_rdlock(args->lock_ptr);
             fd = open(args->filename, O_RDONLY);
             fd2 = open(args->arg2, O_WRONLY | O_CREAT | O_TRUNC, 0644);
             if (fd >= 0 && fd2 >= 0) {
@@ -146,7 +192,7 @@ void* file_worker(void* arguments) {
             } else snprintf(log_msg, sizeof(log_msg), "DONE: Copy (FAILED)");
             
             if (fd >= 0) close(fd); if (fd2 >= 0) close(fd2);
-            pthread_rwlock_unlock(&file_rwlock);
+            pthread_rwlock_unlock(args->lock_ptr);
             log_event(args->thread_id, log_msg);
             break;
 
@@ -154,12 +200,12 @@ void* file_worker(void* arguments) {
             snprintf(log_msg, sizeof(log_msg), "START: Rename %s to %s", args->filename, args->arg2);
             log_event(args->thread_id, log_msg);
             
-            pthread_rwlock_wrlock(&file_rwlock);
+            pthread_rwlock_wrlock(args->lock_ptr);
             if (rename(args->filename, args->arg2) == 0) 
                 snprintf(log_msg, sizeof(log_msg), "DONE: Rename (SUCCESS)");
             else snprintf(log_msg, sizeof(log_msg), "DONE: Rename (FAILED)");
             
-            pthread_rwlock_unlock(&file_rwlock);
+            pthread_rwlock_unlock(args->lock_ptr);
             log_event(args->thread_id, log_msg);
             break;
     }
@@ -185,7 +231,7 @@ void spawn(pthread_t *t, int id, OpType op, const char *f1, const char *f2) {
 
 /* --- MAIN EXECUTION --- */
 int main() {
-    signal(SIGUSR1, handle_status_report);
+ /*   signal(SIGUSR1, handle_status_report);
     pthread_rwlock_init(&file_rwlock, NULL);
     pthread_mutex_init(&log_mutex, NULL);
 
@@ -232,5 +278,63 @@ int main() {
     pthread_mutex_destroy(&log_mutex);
     
     printf("\nExecution Finished. Audit available in system.log\n");
+    return 0;*/
+    
+    /* --- UPDATED MAIN EXECUTION --- */
+    // Standard setup
+    signal(SIGUSR1, handle_status_report);
+    pthread_mutex_init(&log_mutex, NULL);
+    // Note: No global file_rwlock needed anymore!
+
+    // IPC Setup
+    // Use a file path and project ID for ftok to be robust
+    key_t key = ftok(".", 'A'); 
+    int msgqid = msgget(key, 0666 | IPC_CREAT);
+    
+    if (msgqid < 0) {
+        perror("msgget failed");
+        return -1;
+    }
+
+    MsgPacket msgbuf;
+    // msgsize is total struct size minus the long mtype header
+    int msgsize = sizeof(MsgPacket) - sizeof(long);
+    int thread_counter = 0;
+
+    printf("--- Daemon Started: Listening on Message Queue (Key: %d) ---\n", key);
+
+    while(1) {
+        // msgrcv: (id, buffer, size, msg_type, flags)
+        // type 0 means receive any message in the queue
+        if (msgrcv(msgqid, &msgbuf, msgsize, 0, 0) < 0) {
+            perror("msgrcv failed");
+            continue; // Keep listening unless it's a fatal error
+        }
+
+        // 1. Get/Create the lock for THIS specific file (Dynamic Registry)
+        pthread_rwlock_t *f_lock = get_file_lock(msgbuf.filename);
+
+        // 2. Prepare Thread Arguments (Dependency Injection)
+        ThreadArgs *args = malloc(sizeof(ThreadArgs));
+        args->thread_id = ++thread_counter;
+        args->op = msgbuf.op;
+        strncpy(args->filename, msgbuf.filename, 255);
+        strncpy(args->arg2, msgbuf.data, 1023);
+        args->lock_ptr = f_lock; // Passing the specific registry lock
+
+        // 3. Spawn Worker
+        pthread_t t;
+        if (pthread_create(&t, NULL, file_worker, args) != 0) {
+            perror("Failed to create thread");
+            free(args);
+        } else {
+            // Detach so we don't have to join. The thread cleans itself up.
+            pthread_detach(t);
+            log_event(0, "Dispatched worker thread for request.");
+        }
+    }
+
+    // Cleanup (Usually reached via signal handler)
+    msgctl(msgqid, IPC_RMID, NULL);
     return 0;
 }
