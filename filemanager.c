@@ -1,139 +1,211 @@
-#include "types.h"
-#include "stat.h"
-#include "user.h"
-#include "fcntl.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <pthread.h>
+#include <unistd.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <time.h>
 
-// --- SYNCHRONIZATION: READER-WRITER LOCK ---
+// --- Synchronization Locks ---
+// rwlock: Allows multiple concurrent readers, but STRICTLY ONE exclusive writer
+pthread_rwlock_t file_rwlock; 
+pthread_mutex_t log_mutex;    // Ensures logs don't overwrite each other in the terminal
+
+// --- Operation Codes ---
+typedef enum {
+    OP_READ, OP_WRITE, OP_DELETE, OP_RENAME, 
+    OP_COPY, OP_META, OP_COMPRESS, OP_DECOMPRESS
+} OpType;
+
+// --- Thread Argument Structure ---
 typedef struct {
-    lock_t mutex;
-    lock_t write_lock;
-    int readers_count;
-} rwlock_t;
+    int thread_id;
+    OpType op;
+    char filename[128];
+    char arg2[128]; // Used for text payload, new name, or destination file
+} ThreadArgs;
 
-void rwlock_init(rwlock_t *rw) {
-    lock_init(&rw->mutex);
-    lock_init(&rw->write_lock);
-    rw->readers_count = 0;
-}
-
-void acquire_read(rwlock_t *rw) {
-    lock_acquire(&rw->mutex);
-    rw->readers_count++;
-    if (rw->readers_count == 1) lock_acquire(&rw->write_lock);
-    lock_release(&rw->mutex);
-}
-
-void release_read(rwlock_t *rw) {
-    lock_acquire(&rw->mutex);
-    rw->readers_count--;
-    if (rw->readers_count == 0) lock_release(&rw->write_lock);
-    lock_release(&rw->mutex);
-}
-
-void acquire_write(rwlock_t *rw) { lock_acquire(&rw->write_lock); }
-void release_write(rwlock_t *rw) { lock_release(&rw->write_lock); }
-
-// --- GLOBALS ---
-rwlock_t file_lock;
-lock_t console_lock; // Protects the terminal output
-
-struct thread_args {
-    char filename[64];
-    char text[128];
-};
-
-void log_action(char *action, char *filename) {
-    lock_acquire(&console_lock);
-    printf(1, "[AUDIT LOG] Action: %s on File: %s\n", action, filename);
-    lock_release(&console_lock);
-}
-
-// --- FEATURE 1: CONCURRENT READING ---
-void read_file(void *arg1, void *arg2) {
-    struct thread_args *args = (struct thread_args*)arg1;
-    char buf[256];
+// --- Thread-Safe Logger ---
+void log_action(int t_id, const char *action, const char *filename, const char *status) {
+    pthread_mutex_lock(&log_mutex);
+    time_t now;
+    time(&now);
+    char *time_str = ctime(&now);
+    time_str[strlen(time_str) - 1] = '\0'; // Remove newline
     
-    acquire_read(&file_lock);
-    int fd = open(args->filename, O_RDONLY);
-    if (fd >= 0) {
-        int n = read(fd, buf, sizeof(buf)-1);
-        if (n >= 0) buf[n] = '\0';
-        
-        lock_acquire(&console_lock);
-        printf(1, "Read from %s: \n%s\n", args->filename, buf);
-        lock_release(&console_lock);
-        
-        close(fd);
-        log_action("READ", args->filename);
+    FILE *log_file = fopen("system.log", "a");
+    if(log_file) {
+        fprintf(log_file, "[%s] Thread-%d | %s on '%s' | Status: %s\n", time_str, t_id, action, filename, status);
+        fclose(log_file);
     }
-    release_read(&file_lock);
-    exit();
+    printf("[%s] Thread-%d | %s on '%s' | Status: %s\n", time_str, t_id, action, filename, status);
+    pthread_mutex_unlock(&log_mutex);
 }
 
-// --- FEATURE 2: EXCLUSIVE WRITING ---
-void write_file(void *arg1, void *arg2) {
-    struct thread_args *args = (struct thread_args*)arg1;
-    
-    acquire_write(&file_lock);
-    int fd = open(args->filename, O_CREATE | O_WRONLY); 
-    if (fd >= 0) {
-        write(fd, args->text, strlen(args->text));
-        close(fd);
-        log_action("WRITE", args->filename);
+// --- The Worker Thread ---
+void* file_worker(void* arguments) {
+    ThreadArgs *args = (ThreadArgs*)arguments;
+    char cmd[256];
+    struct stat file_stat;
+
+    switch(args->op) {
+        case OP_WRITE:
+            // EXCLUSIVE WRITE: Wait until all readers/writers are done, then lock
+            pthread_rwlock_wrlock(&file_rwlock); 
+            FILE *f_write = fopen(args->filename, "a");
+            if (f_write) {
+                fprintf(f_write, "%s\n", args->arg2);
+                fclose(f_write);
+                log_action(args->thread_id, "WRITE", args->filename, "SUCCESS");
+            } else {
+                log_action(args->thread_id, "WRITE", args->filename, "FAILED (Cannot open)");
+            }
+            sleep(1); // Simulate work to prove exclusivity
+            pthread_rwlock_unlock(&file_rwlock);
+            break;
+
+        case OP_READ:
+            // CONCURRENT READ: Multiple threads can hold this lock simultaneously
+            pthread_rwlock_rdlock(&file_rwlock);
+            FILE *f_read = fopen(args->filename, "r");
+            if (f_read) {
+                char buffer[256];
+                printf("[Thread-%d reads]: ", args->thread_id);
+                while(fgets(buffer, sizeof(buffer), f_read)) {
+                    printf("%s", buffer);
+                }
+                fclose(f_read);
+                log_action(args->thread_id, "READ", args->filename, "SUCCESS");
+            } else {
+                log_action(args->thread_id, "READ", args->filename, "FAILED");
+            }
+            sleep(1); // Simulate work to prove concurrency
+            pthread_rwlock_unlock(&file_rwlock);
+            break;
+
+        case OP_META:
+            pthread_rwlock_rdlock(&file_rwlock);
+            if(stat(args->filename, &file_stat) == 0) {
+                printf("[Thread-%d META]: Size=%ld bytes, Permissions=%o\n", 
+                        args->thread_id, file_stat.st_size, file_stat.st_mode & 0777);
+                log_action(args->thread_id, "METADATA", args->filename, "SUCCESS");
+            } else {
+                log_action(args->thread_id, "METADATA", args->filename, "FAILED");
+            }
+            pthread_rwlock_unlock(&file_rwlock);
+            break;
+
+        case OP_COPY:
+            pthread_rwlock_rdlock(&file_rwlock); // Lock source for reading
+            FILE *src = fopen(args->filename, "r");
+            FILE *dst = fopen(args->arg2, "w");
+            if(src && dst) {
+                char ch;
+                while((ch = fgetc(src)) != EOF) fputc(ch, dst);
+                log_action(args->thread_id, "COPY", args->filename, "SUCCESS");
+            } else {
+                log_action(args->thread_id, "COPY", args->filename, "FAILED");
+            }
+            if(src) fclose(src);
+            if(dst) fclose(dst);
+            pthread_rwlock_unlock(&file_rwlock);
+            break;
+
+        case OP_RENAME:
+            pthread_rwlock_wrlock(&file_rwlock); // Lock file exclusively to rename
+            if(rename(args->filename, args->arg2) == 0) {
+                log_action(args->thread_id, "RENAME", args->filename, "SUCCESS");
+            } else {
+                log_action(args->thread_id, "RENAME", args->filename, "FAILED");
+            }
+            pthread_rwlock_unlock(&file_rwlock);
+            break;
+
+        case OP_COMPRESS:
+            pthread_rwlock_wrlock(&file_rwlock);
+            snprintf(cmd, sizeof(cmd), "gzip -f %s", args->filename);
+            if(system(cmd) == 0) log_action(args->thread_id, "COMPRESS", args->filename, "SUCCESS");
+            else log_action(args->thread_id, "COMPRESS", args->filename, "FAILED");
+            pthread_rwlock_unlock(&file_rwlock);
+            break;
+
+        case OP_DECOMPRESS:
+            pthread_rwlock_wrlock(&file_rwlock);
+            snprintf(cmd, sizeof(cmd), "gzip -d -f %s.gz", args->filename);
+            if(system(cmd) == 0) log_action(args->thread_id, "DECOMPRESS", args->filename, "SUCCESS");
+            else log_action(args->thread_id, "DECOMPRESS", args->filename, "FAILED");
+            pthread_rwlock_unlock(&file_rwlock);
+            break;
+
+        case OP_DELETE:
+            pthread_rwlock_wrlock(&file_rwlock);
+            if(remove(args->filename) == 0) {
+                log_action(args->thread_id, "DELETE", args->filename, "SUCCESS");
+            } else {
+                log_action(args->thread_id, "DELETE", args->filename, "FAILED");
+            }
+            pthread_rwlock_unlock(&file_rwlock);
+            break;
     }
-    release_write(&file_lock);
-    exit();
+    
+    free(arguments);
+    return NULL;
 }
 
-// --- FEATURE 6: METADATA ---
-void show_metadata(void *arg1, void *arg2) {
-    struct thread_args *args = (struct thread_args*)arg1;
-    struct stat st;
-    
-    acquire_read(&file_lock);
-    if (stat(args->filename, &st) >= 0) {
-        lock_acquire(&console_lock);
-        printf(1, "Metadata for %s:\n", args->filename);
-        printf(1, "  Type: %d (1=Dir, 2=File, 3=Dev)\n", st.type);
-        printf(1, "  Inode: %d\n", st.ino);
-        printf(1, "  Size: %d bytes\n", st.size);
-        lock_release(&console_lock);
-        
-        log_action("METADATA", args->filename);
-    }
-    release_read(&file_lock);
-    exit();
+// --- Helper to spawn threads ---
+void create_thread(pthread_t *t, int id, OpType op, const char *f1, const char *f2) {
+    ThreadArgs *args = malloc(sizeof(ThreadArgs));
+    args->thread_id = id;
+    args->op = op;
+    strcpy(args->filename, f1);
+    if(f2) strcpy(args->arg2, f2);
+    pthread_create(t, NULL, file_worker, (void*)args);
 }
 
-int main(int argc, char *argv[]) {
-    rwlock_init(&file_lock);
-    lock_init(&console_lock);
-    
-    printf(1, "Starting Interactive Multithreaded File Manager...\n");
-    printf(1, "--------------------------------------------------\n");
-    
-    struct thread_args *args = (struct thread_args*)malloc(sizeof(struct thread_args));
-    
-    printf(1, "Enter the name of the file to create/write: ");
-    gets(args->filename, 64);
-    args->filename[strlen(args->filename)-1] = '\0';
+int main() {
+    // Initialize Synchronization Locks
+    pthread_rwlock_init(&file_rwlock, NULL);
+    pthread_mutex_init(&log_mutex, NULL);
 
-    printf(1, "Enter the text you want to write into the file: ");
-    gets(args->text, 128);
+    pthread_t threads[10];
 
-    printf(1, "\nExecuting Threads...\n");
+    printf("--- Multi-Threaded File Management System ---\n\n");
 
-    // Phase 1: Writer Thread
-    thread_create(&write_file, (void*)args, 0);
-    thread_join(); 
+    // TEST 1: Exclusive Write
+    create_thread(&threads[0], 1, OP_WRITE, "target.txt", "Initial file data.");
+    pthread_join(threads[0], NULL); // Wait for setup
 
-    // Phase 2: Concurrent Reader & Metadata Threads
-    thread_create(&read_file, (void*)args, 0);
-    thread_create(&show_metadata, (void*)args, 0);
-    thread_join();
-    thread_join();
+    // TEST 2: Concurrent Readers (These will run at the exact same time)
+    create_thread(&threads[1], 2, OP_READ, "target.txt", NULL);
+    create_thread(&threads[2], 3, OP_READ, "target.txt", NULL);
+    create_thread(&threads[3], 4, OP_READ, "target.txt", NULL);
     
-    free(args);
-    printf(1, "File operations complete. Exiting.\n");
-    exit();
+    // TEST 3: Metadata and Copy
+    create_thread(&threads[4], 5, OP_META, "target.txt", NULL);
+    create_thread(&threads[5], 6, OP_COPY, "target.txt", "backup.txt");
+
+    // Wait for readers/metadata to finish before proceeding to destructive ops
+    for(int i = 1; i <= 5; i++) pthread_join(threads[i], NULL);
+
+    // TEST 4: Compress and Decompress
+    create_thread(&threads[6], 7, OP_COMPRESS, "target.txt", NULL);
+    pthread_join(threads[6], NULL);
+    
+    create_thread(&threads[7], 8, OP_DECOMPRESS, "target.txt", NULL);
+    pthread_join(threads[7], NULL);
+
+    // TEST 5: Rename and Delete
+    create_thread(&threads[8], 9, OP_RENAME, "target.txt", "old_target.txt");
+    pthread_join(threads[8], NULL);
+
+    create_thread(&threads[9], 10, OP_DELETE, "old_target.txt", NULL);
+    pthread_join(threads[9], NULL);
+
+    // Cleanup
+    pthread_rwlock_destroy(&file_rwlock);
+    pthread_mutex_destroy(&log_mutex);
+
+    printf("\n--- Simulation Complete. Check system.log for history. ---\n");
+    return 0;
 }
