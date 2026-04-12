@@ -81,11 +81,23 @@ void* daemon_worker(void* arg) {
             break;
 
         case OP_META:
-            pthread_rwlock_rdlock(file_lock);
-            if (stat(task->filename, &st) == 0) {
-                printf("[Meta] %s: Size=%ld, Inode=%ld\n", task->filename, (long)st.st_size, (long)st.st_ino);
+            pthread_rwlock_rdlock(file_lock); // Use 'file_lock' defined at line 41
+            // Note: 'st' is already declared at line 44, so we just use it here
+            if (stat(task->filename, &st) == 0) { // Use 'task' instead of 't'
+                char time_buf[100];
+                // Formatting the status change time
+                strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M:%S", localtime(&st.st_ctime));
+
+                printf("\n--- Metadata for: %s ---\n", task->filename);
+                printf("Size:        %ld bytes\n", (long)st.st_size);
+                printf("Inode:       %ld\n", (long)st.st_ino);
+                printf("Permissions: %o (Octal)\n", st.st_mode & 0777);
+                printf("Status Date: %s\n", time_buf);
+                printf("---------------------------\n");
+            } else {
+                printf("[Error] Metadata failed: %s not found.\n", task->filename);
             }
-            pthread_rwlock_unlock(file_lock);
+            pthread_rwlock_unlock(file_lock); // Use 'file_lock'
             break;
 
         case OP_COMPRESS:
