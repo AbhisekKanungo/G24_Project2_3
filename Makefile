@@ -8,4 +8,4 @@ $(TARGET): filemanager.c
 	$(CC) filemanager.c -o $(TARGET) $(CFLAGS)
 
 clean:
-	rm -f $(TARGET) system.log
+	rm -f $(TARGET) system.log report.txt backup.txt final_report.txt
