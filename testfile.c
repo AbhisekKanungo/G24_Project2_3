@@ -7,7 +7,7 @@
 #include <sys/types.h>
 
 /* --- CONSTANTS (Must match Daemon) --- */
-typedef enum { OP_READ, OP_WRITE, OP_DELETE, OP_RENAME, OP_COPY, OP_META } OpType;
+typedef enum {  OP_READ, OP_WRITE, OP_DELETE, OP_RENAME, OP_COPY, OP_META, OP_COMPRESS, OP_DECOMPRESS } OpType;
 
 typedef struct {
     long mtype;

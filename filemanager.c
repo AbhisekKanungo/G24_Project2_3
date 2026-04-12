@@ -16,7 +16,7 @@ pthread_rwlock_t file_rwlock;
 pthread_mutex_t log_mutex;
 
 /* --- DATA STRUCTURES --- */
-typedef enum { OP_READ, OP_WRITE, OP_DELETE, OP_RENAME, OP_COPY, OP_META } OpType;
+typedef enum { OP_READ, OP_WRITE, OP_DELETE, OP_RENAME, OP_COPY, OP_META, OP_COMPRESS, OP_DECOMPRESS } OpType;
 
 /* --- REGISTRY & IPC STRUCTURES --- */
 
@@ -95,11 +95,47 @@ void handle_status_report(int sig) {
 void* file_worker(void* arguments) {
     ThreadArgs *args = (ThreadArgs*)arguments;
     int fd, fd2;
-    char buffer[1024], log_msg[2048]; 
+    char buffer[1024], log_msg[2048], cmd[512]; 
     ssize_t bytes;
     struct stat st;
 
     switch(args->op) {
+	case OP_COMPRESS:
+            snprintf(log_msg, sizeof(log_msg), "START: Compressing %s", args->filename);
+            log_event(args->thread_id, log_msg);
+            
+            // Use the DYNAMIC lock from the registry
+            pthread_rwlock_rdlock(args->lock_ptr); 
+            
+            // -k (keep source) -f (force)
+            snprintf(cmd, sizeof(cmd), "gzip -k -f %s 2>/dev/null", args->filename);
+            
+            if (system(cmd) == 0) 
+                snprintf(log_msg, sizeof(log_msg), "DONE: Compression (SUCCESS)");
+            else 
+                snprintf(log_msg, sizeof(log_msg), "DONE: Compression (FAILED)");
+            
+            pthread_rwlock_unlock(args->lock_ptr);
+            log_event(args->thread_id, log_msg);
+            break;
+
+        case OP_DECOMPRESS:
+            snprintf(log_msg, sizeof(log_msg), "START: Decompressing %s", args->filename);
+            log_event(args->thread_id, log_msg);
+            
+            // Decompression is a destructive/modifying op, use Write Lock
+            pthread_rwlock_wrlock(args->lock_ptr);
+            
+            snprintf(cmd, sizeof(cmd), "gunzip -k -f %s 2>/dev/null", args->filename);
+            
+            if (system(cmd) == 0) 
+                snprintf(log_msg, sizeof(log_msg), "DONE: Decompression (SUCCESS)");
+            else 
+                snprintf(log_msg, sizeof(log_msg), "DONE: Decompression (FAILED)");
+            
+            pthread_rwlock_unlock(args->lock_ptr);
+            log_event(args->thread_id, log_msg);
+            break;
         case OP_WRITE:
             snprintf(log_msg, sizeof(log_msg), "START: Write to %s", args->filename);
             log_event(args->thread_id, log_msg);
