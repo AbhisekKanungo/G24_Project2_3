@@ -15,7 +15,7 @@ pthread_rwlock_t file_rwlock;
 pthread_mutex_t log_mutex;
 
 /* --- DATA STRUCTURES --- */
-typedef enum { OP_READ, OP_WRITE, OP_DELETE, OP_RENAME, OP_COPY, OP_META } OpType;
+typedef enum { OP_READ, OP_WRITE, OP_DELETE, OP_RENAME, OP_COPY, OP_META, OP_COMPRESS, OP_DECOMPRESS } OpType;
 
 typedef struct {
     int thread_id;
@@ -49,7 +49,7 @@ void handle_status_report(int sig) {
 void* file_worker(void* arguments) {
     ThreadArgs *args = (ThreadArgs*)arguments;
     int fd, fd2;
-    char buffer[1024], log_msg[2048]; 
+    char buffer[1024], log_msg[2048], cmd[512]; 
     ssize_t bytes;
     struct stat st;
 
@@ -108,24 +108,56 @@ void* file_worker(void* arguments) {
             pthread_rwlock_unlock(&file_rwlock);
             log_event(args->thread_id, log_msg);
             break;
-	case OP_DELETE:
-    	    snprintf(log_msg, sizeof(log_msg), "START: Delete %s", args->filename);
-    	    log_event(args->thread_id, log_msg);
-    	    pthread_rwlock_wrlock(&file_rwlock);
-    	if (unlink(args->filename) == 0) 
-        	snprintf(log_msg, sizeof(log_msg), "DONE: Delete %s (SUCCESS)", args->filename);
-    	else 
-     		snprintf(log_msg, sizeof(log_msg), "DONE: Delete %s (FAILED)", args->filename);
-    	    pthread_rwlock_unlock(&file_rwlock);
-    	    log_event(args->thread_id, log_msg);
-    	    break;
+
+        case OP_COMPRESS:
+            snprintf(log_msg, sizeof(log_msg), "START: Compressing %s", args->filename);
+            log_event(args->thread_id, log_msg);
+            
+            pthread_rwlock_rdlock(&file_rwlock);
+            snprintf(cmd, sizeof(cmd), "gzip -k -f %s", args->filename);
+            if (system(cmd) == 0) 
+                snprintf(log_msg, sizeof(log_msg), "DONE: Compression (SUCCESS)");
+            else 
+                snprintf(log_msg, sizeof(log_msg), "DONE: Compression (FAILED)");
+            pthread_rwlock_unlock(&file_rwlock);
+            
+            log_event(args->thread_id, log_msg);
+            break;
+
+        case OP_DECOMPRESS:
+            snprintf(log_msg, sizeof(log_msg), "START: Decompressing %s", args->filename);
+            log_event(args->thread_id, log_msg);
+            
+            pthread_rwlock_wrlock(&file_rwlock);
+            snprintf(cmd, sizeof(cmd), "gunzip -k -f %s", args->filename);
+            if (system(cmd) == 0) 
+                snprintf(log_msg, sizeof(log_msg), "DONE: Decompression (SUCCESS)");
+            else 
+                snprintf(log_msg, sizeof(log_msg), "DONE: Decompression (FAILED)");
+            pthread_rwlock_unlock(&file_rwlock);
+            
+            log_event(args->thread_id, log_msg);
+            break;
+
+        case OP_DELETE:
+            snprintf(log_msg, sizeof(log_msg), "START: Delete %s", args->filename);
+            log_event(args->thread_id, log_msg);
+            pthread_rwlock_wrlock(&file_rwlock);
+            if (unlink(args->filename) == 0) 
+                snprintf(log_msg, sizeof(log_msg), "DONE: Delete %s (SUCCESS)", args->filename);
+            else 
+                snprintf(log_msg, sizeof(log_msg), "DONE: Delete %s (FAILED)", args->filename);
+            pthread_rwlock_unlock(&file_rwlock);
+            log_event(args->thread_id, log_msg);
+            break;
+
         case OP_META: // Feature 6: Metadata Display
             snprintf(log_msg, sizeof(log_msg), "START: Meta of %s", args->filename);
             log_event(args->thread_id, log_msg);
             
             pthread_rwlock_rdlock(&file_rwlock);
             if (stat(args->filename, &st) == 0) {
-                printf("[Thread-%d Info] %s: Size=%ld bytes, Inode=%ld\n", args->thread_id, args->filename, st.st_size, st.st_ino);
+                printf("[Thread-%d Info] %s: Size=%ld bytes, Inode=%ld\n", args->thread_id, args->filename, (long)st.st_size, (long)st.st_ino);
                 snprintf(log_msg, sizeof(log_msg), "DONE: Meta (SUCCESS)");
             } else snprintf(log_msg, sizeof(log_msg), "DONE: Meta (FAILED)");
             
@@ -189,7 +221,7 @@ int main() {
     pthread_rwlock_init(&file_rwlock, NULL);
     pthread_mutex_init(&log_mutex, NULL);
 
-    pthread_t t[10];
+    pthread_t t[15]; // Expanded to support the new optional threads
     printf("--- G24 Project 2: Multi-threaded System ---\n\n");
 
     const char *data = "Project: Multi-threaded File Manager\nInstitution: IIT (ISM) Dhanbad\nDetails: This code demonstrates Readers-Writer locking, Signal handling, and direct Linux system calls.\n";
@@ -211,21 +243,40 @@ int main() {
     spawn(&t[5], 6, OP_RENAME, "report.txt", "final_report.txt");
     pthread_join(t[5], NULL);
 
-    // --- NEW: OPTIONAL DELETION STEP ---
     char choice;
+
+    // --- NEW: OPTIONAL COMPRESSION STEP ---
+    printf("\nDo you want to COMPRESS 'final_report.txt'? (y/n): ");
+    scanf(" %c", &choice);
+    if (choice == 'y' || choice == 'Y') {
+        spawn(&t[6], 7, OP_COMPRESS, "final_report.txt", NULL);
+        pthread_join(t[6], NULL);
+    }
+
+    // --- NEW: OPTIONAL DECOMPRESSION STEP ---
+    printf("\nDo you want to DECOMPRESS 'final_report.txt.gz'? (y/n): ");
+    scanf(" %c", &choice);
+    if (choice == 'y' || choice == 'Y') {
+        spawn(&t[7], 8, OP_DECOMPRESS, "final_report.txt.gz", NULL);
+        pthread_join(t[7], NULL);
+    }
+
+    // --- OPTIONAL DELETION STEP ---
     printf("\nBatch operations complete. Do you want to delete the generated files? (y/n): ");
     scanf(" %c", &choice);
 
     if (choice == 'y' || choice == 'Y') {
         printf("Cleaning up files...\n");
         // Deleting the files created/renamed during the process
-        spawn(&t[6], 7, OP_DELETE, "backup.txt", NULL);
-        spawn(&t[7], 8, OP_DELETE, "final_report.txt", NULL);
+        spawn(&t[8], 9, OP_DELETE, "backup.txt", NULL); // In case it wasn't renamed successfully
+        spawn(&t[9], 10, OP_DELETE, "final_report.txt", NULL);
+        spawn(&t[10], 11, OP_DELETE, "final_report.txt.gz", NULL);
         
-        pthread_join(t[6], NULL);
-        pthread_join(t[7], NULL);
+        pthread_join(t[8], NULL);
+        pthread_join(t[9], NULL);
+        pthread_join(t[10], NULL);
     } else {
-        printf("Cleanup skipped. Files 'backup.txt' and 'final_report.txt' preserved.\n");
+        printf("Cleanup skipped. Files preserved.\n");
     }
 
     pthread_rwlock_destroy(&file_rwlock);
