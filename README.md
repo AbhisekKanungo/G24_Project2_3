@@ -1,24 +1,33 @@
-# Multi-Threaded File Management System
+# Multi-threaded File Management System (Linux)
 
-A concurrent file management system implemented in C using POSIX Threads (**pthreads**) on Linux.
+## Overview
+An advanced multi-threaded file manager implemented in C using POSIX threads. The system ensures high-performance logical concurrency for reads while maintaining strict physical exclusivity for writes.
 
-## Features
-* **Concurrent Reading:** Multiple threads can read simultaneously using `pthread_rwlock_t`.
-* **Exclusive Writing:** Ensures only one writer has access at a time.
-* **Signal Handling:** Implements `SIGUSR1` for real-time system status reports.
-* **Robust Error Handling:** Validates file descriptors and system call returns.
-* **File Operations:** Supports Copy, Rename, Delete, Metadata, and Compression (gzip).
+## Implemented Features
+* **RW-Lock Concurrency:** Uses `pthread_rwlock` to facilitate multiple simultaneous readers.
+* **Management Suite:** Fully implemented `DELETE`, `RENAME`, `COPY`, and `META` (Inode/Size) operations.
+* **Asynchronous Status Monitoring:** Custom `SIGUSR1` handler for real-time health checks.
+* **Data Integrity:** Integrated `fsync()` calls to prevent data truncation and ensure kernel-level persistence.
+* **Thread-Safe Auditing:** Centralized `system.log` protected by mutex synchronization.
 
-## Synchronization Mechanisms
-* **RW Locks:** Used for the Readers-Writer problem to maximize concurrency.
-* **Mutexes:** Used to protect the shared log file/terminal output.
+## Execution Guide
+### Compilation
+```bash
+gcc filemanager.c -o file_manager -pthread
+```
 
-## How to Run
-1. **Compile:**
-   ```bash
-   make
-   ```
-2. **Execute:**
-   ```bash
-   ./file_manager
-   ```
+### Running the System
+```bash
+./file_manager
+```
+
+### Demonstrating Signal Handling
+Open a separate terminal during execution and run:
+```bash
+killall -SIGUSR1 file_manager
+```
+
+## Technical Fixes
+* Expanded `ThreadArgs` buffer to **1024 bytes** to fix string truncation issues.
+* Resolved Race Conditions in terminal output using mutex-guarded logging.
+* Implemented interactive post-execution cleanup for workspace management.
