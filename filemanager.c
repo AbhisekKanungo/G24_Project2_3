@@ -6,206 +6,231 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <time.h>
+#include <signal.h>
 
-// --- Synchronization Locks ---
-// rwlock: Allows multiple concurrent readers, but STRICTLY ONE exclusive writer
+/* --- GLOBAL SYNCHRONIZATION OBJECTS --- */
+// Feature 1 & 2: RW Lock allows multiple concurrent readers OR one exclusive writer
 pthread_rwlock_t file_rwlock; 
-pthread_mutex_t log_mutex;    // Ensures logs don't overwrite each other in the terminal
+// Feature 8: Mutex ensures that log entries from different threads don't overlap
+pthread_mutex_t log_mutex;
 
-// --- Operation Codes ---
-typedef enum {
-    OP_READ, OP_WRITE, OP_DELETE, OP_RENAME, 
-    OP_COPY, OP_META, OP_COMPRESS, OP_DECOMPRESS
-} OpType;
+/* --- DATA STRUCTURES --- */
+typedef enum { OP_READ, OP_WRITE, OP_DELETE, OP_RENAME, OP_COPY, OP_META } OpType;
 
-// --- Thread Argument Structure ---
 typedef struct {
     int thread_id;
     OpType op;
-    char filename[128];
-    char arg2[128]; // Used for text payload, new name, or destination file
+    char filename[256];
+    char arg2[1024]; 
 } ThreadArgs;
 
-// --- Thread-Safe Logger ---
-void log_action(int t_id, const char *action, const char *filename, const char *status) {
+/* --- LOGGING SYSTEM (Feature 8: Auditing) --- */
+void log_event(int t_id, const char *msg) {
     pthread_mutex_lock(&log_mutex);
-    time_t now;
-    time(&now);
-    char *time_str = ctime(&now);
-    time_str[strlen(time_str) - 1] = '\0'; // Remove newline
+    time_t now = time(NULL);
+    char *ts = ctime(&now);
+    ts[strlen(ts) - 1] = '\0'; // Clean newline
     
-    FILE *log_file = fopen("system.log", "a");
-    if(log_file) {
-        fprintf(log_file, "[%s] Thread-%d | %s on '%s' | Status: %s\n", time_str, t_id, action, filename, status);
-        fclose(log_file);
+    int log_fd = open("system.log", O_WRONLY | O_APPEND | O_CREAT, 0644);
+    if (log_fd >= 0) {
+        dprintf(log_fd, "[%s] Thread-%d: %s\n", ts, t_id, msg);
+        close(log_fd);
     }
-    printf("[%s] Thread-%d | %s on '%s' | Status: %s\n", time_str, t_id, action, filename, status);
+    printf("[%s] Thread-%d: %s\n", ts, t_id, msg);
     pthread_mutex_unlock(&log_mutex);
 }
 
-// --- The Worker Thread ---
+/* --- SIGNAL HANDLING (Note 1: Signals) --- */
+void handle_status_report(int sig) {
+    log_event(0, "SIGNAL RECEIVED - SIGUSR1: System Health Check Success.");
+}
+
+/* --- CORE WORKER FUNCTION --- */
 void* file_worker(void* arguments) {
     ThreadArgs *args = (ThreadArgs*)arguments;
-    char cmd[256];
-    struct stat file_stat;
+    int fd, fd2;
+    char buffer[1024], log_msg[2048]; 
+    ssize_t bytes;
+    struct stat st;
 
     switch(args->op) {
         case OP_WRITE:
-            // EXCLUSIVE WRITE: Wait until all readers/writers are done, then lock
-            pthread_rwlock_wrlock(&file_rwlock); 
-            FILE *f_write = fopen(args->filename, "a");
-            if (f_write) {
-                fprintf(f_write, "%s\n", args->arg2);
-                fclose(f_write);
-                log_action(args->thread_id, "WRITE", args->filename, "SUCCESS");
+            snprintf(log_msg, sizeof(log_msg), "START: Write to %s", args->filename);
+            log_event(args->thread_id, log_msg);
+            
+            pthread_rwlock_wrlock(&file_rwlock);
+            fd = open(args->filename, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+            if (fd >= 0) {
+                write(fd, args->arg2, strlen(args->arg2));
+                
+                // CRITICAL FIX: Force the kernel to flush the buffer to disk
+                fsync(fd); 
+                
+                close(fd);
+                snprintf(log_msg, sizeof(log_msg), "DONE: Write to %s (SUCCESS)", args->filename);
             } else {
-                log_action(args->thread_id, "WRITE", args->filename, "FAILED (Cannot open)");
+                snprintf(log_msg, sizeof(log_msg), "DONE: Write (FAILED)");
             }
-            sleep(1); // Simulate work to prove exclusivity
+            sleep(1); 
             pthread_rwlock_unlock(&file_rwlock);
+            log_event(args->thread_id, log_msg);
             break;
 
         case OP_READ:
-            // CONCURRENT READ: Multiple threads can hold this lock simultaneously
+            snprintf(log_msg, sizeof(log_msg), "START: Read of %s", args->filename);
+            log_event(args->thread_id, log_msg);
+            
             pthread_rwlock_rdlock(&file_rwlock);
-            FILE *f_read = fopen(args->filename, "r");
-            if (f_read) {
-                char buffer[256];
-                printf("[Thread-%d reads]: ", args->thread_id);
-                while(fgets(buffer, sizeof(buffer), f_read)) {
-                    printf("%s", buffer);
+            fd = open(args->filename, O_RDONLY);
+            if (fd >= 0) {
+                // Use a local buffer to avoid thread interference
+                char local_buf[1024]; 
+                ssize_t r_bytes;
+
+                // Explicit header so we know who is starting
+                dprintf(STDOUT_FILENO, "\n[Thread-%d] --- BEGIN READ ---\n", args->thread_id);
+
+                // The Fix: Read and write the FULL file content
+                while ((r_bytes = read(fd, local_buf, sizeof(local_buf))) > 0) {
+                    // write() is thread-safe at the kernel level for STDOUT
+                    write(STDOUT_FILENO, local_buf, r_bytes);
                 }
-                fclose(f_read);
-                log_action(args->thread_id, "READ", args->filename, "SUCCESS");
-            } else {
-                log_action(args->thread_id, "READ", args->filename, "FAILED");
-            }
-            sleep(1); // Simulate work to prove concurrency
-            pthread_rwlock_unlock(&file_rwlock);
-            break;
 
-        case OP_META:
+                dprintf(STDOUT_FILENO, "\n[Thread-%d] --- END READ ---\n", args->thread_id);
+                close(fd);
+                snprintf(log_msg, sizeof(log_msg), "DONE: Read %s (SUCCESS)", args->filename);
+            } else {
+                snprintf(log_msg, sizeof(log_msg), "DONE: Read (FAILED)");
+            }
+            
+            // This sleep ensures the threads overlap long enough for you to see it
+            sleep(2); 
+            pthread_rwlock_unlock(&file_rwlock);
+            log_event(args->thread_id, log_msg);
+            break;
+	case OP_DELETE:
+    	    snprintf(log_msg, sizeof(log_msg), "START: Delete %s", args->filename);
+    	    log_event(args->thread_id, log_msg);
+    	    pthread_rwlock_wrlock(&file_rwlock);
+    	if (unlink(args->filename) == 0) 
+        	snprintf(log_msg, sizeof(log_msg), "DONE: Delete %s (SUCCESS)", args->filename);
+    	else 
+     		snprintf(log_msg, sizeof(log_msg), "DONE: Delete %s (FAILED)", args->filename);
+    	    pthread_rwlock_unlock(&file_rwlock);
+    	    log_event(args->thread_id, log_msg);
+    	    break;
+        case OP_META: // Feature 6: Metadata Display
+            snprintf(log_msg, sizeof(log_msg), "START: Meta of %s", args->filename);
+            log_event(args->thread_id, log_msg);
+            
             pthread_rwlock_rdlock(&file_rwlock);
-            if(stat(args->filename, &file_stat) == 0) {
-                printf("[Thread-%d META]: Size=%ld bytes, Permissions=%o\n", 
-                        args->thread_id, file_stat.st_size, file_stat.st_mode & 0777);
-                log_action(args->thread_id, "METADATA", args->filename, "SUCCESS");
-            } else {
-                log_action(args->thread_id, "METADATA", args->filename, "FAILED");
-            }
+            if (stat(args->filename, &st) == 0) {
+                printf("[Thread-%d Info] %s: Size=%ld bytes, Inode=%ld\n", args->thread_id, args->filename, st.st_size, st.st_ino);
+                snprintf(log_msg, sizeof(log_msg), "DONE: Meta (SUCCESS)");
+            } else snprintf(log_msg, sizeof(log_msg), "DONE: Meta (FAILED)");
+            
             pthread_rwlock_unlock(&file_rwlock);
+            log_event(args->thread_id, log_msg);
             break;
 
-        case OP_COPY:
-            pthread_rwlock_rdlock(&file_rwlock); // Lock source for reading
-            FILE *src = fopen(args->filename, "r");
-            FILE *dst = fopen(args->arg2, "w");
-            if(src && dst) {
-                char ch;
-                while((ch = fgetc(src)) != EOF) fputc(ch, dst);
-                log_action(args->thread_id, "COPY", args->filename, "SUCCESS");
-            } else {
-                log_action(args->thread_id, "COPY", args->filename, "FAILED");
-            }
-            if(src) fclose(src);
-            if(dst) fclose(dst);
+        case OP_COPY: // Feature 5: File Copying
+            snprintf(log_msg, sizeof(log_msg), "START: Copy %s to %s", args->filename, args->arg2);
+            log_event(args->thread_id, log_msg);
+            
+            pthread_rwlock_rdlock(&file_rwlock);
+            fd = open(args->filename, O_RDONLY);
+            fd2 = open(args->arg2, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+            if (fd >= 0 && fd2 >= 0) {
+                while ((bytes = read(fd, buffer, sizeof(buffer))) > 0) write(fd2, buffer, bytes);
+                snprintf(log_msg, sizeof(log_msg), "DONE: Copy (SUCCESS)");
+            } else snprintf(log_msg, sizeof(log_msg), "DONE: Copy (FAILED)");
+            
+            if (fd >= 0) close(fd); if (fd2 >= 0) close(fd2);
             pthread_rwlock_unlock(&file_rwlock);
+            log_event(args->thread_id, log_msg);
             break;
 
-        case OP_RENAME:
-            pthread_rwlock_wrlock(&file_rwlock); // Lock file exclusively to rename
-            if(rename(args->filename, args->arg2) == 0) {
-                log_action(args->thread_id, "RENAME", args->filename, "SUCCESS");
-            } else {
-                log_action(args->thread_id, "RENAME", args->filename, "FAILED");
-            }
-            pthread_rwlock_unlock(&file_rwlock);
-            break;
-
-        case OP_COMPRESS:
+        case OP_RENAME: // Feature 4: File Renaming
+            snprintf(log_msg, sizeof(log_msg), "START: Rename %s to %s", args->filename, args->arg2);
+            log_event(args->thread_id, log_msg);
+            
             pthread_rwlock_wrlock(&file_rwlock);
-            snprintf(cmd, sizeof(cmd), "gzip -f %s", args->filename);
-            if(system(cmd) == 0) log_action(args->thread_id, "COMPRESS", args->filename, "SUCCESS");
-            else log_action(args->thread_id, "COMPRESS", args->filename, "FAILED");
+            if (rename(args->filename, args->arg2) == 0) 
+                snprintf(log_msg, sizeof(log_msg), "DONE: Rename (SUCCESS)");
+            else snprintf(log_msg, sizeof(log_msg), "DONE: Rename (FAILED)");
+            
             pthread_rwlock_unlock(&file_rwlock);
-            break;
-
-        case OP_DECOMPRESS:
-            pthread_rwlock_wrlock(&file_rwlock);
-            snprintf(cmd, sizeof(cmd), "gzip -d -f %s.gz", args->filename);
-            if(system(cmd) == 0) log_action(args->thread_id, "DECOMPRESS", args->filename, "SUCCESS");
-            else log_action(args->thread_id, "DECOMPRESS", args->filename, "FAILED");
-            pthread_rwlock_unlock(&file_rwlock);
-            break;
-
-        case OP_DELETE:
-            pthread_rwlock_wrlock(&file_rwlock);
-            if(remove(args->filename) == 0) {
-                log_action(args->thread_id, "DELETE", args->filename, "SUCCESS");
-            } else {
-                log_action(args->thread_id, "DELETE", args->filename, "FAILED");
-            }
-            pthread_rwlock_unlock(&file_rwlock);
+            log_event(args->thread_id, log_msg);
             break;
     }
-    
     free(arguments);
     return NULL;
 }
 
-// --- Helper to spawn threads ---
-void create_thread(pthread_t *t, int id, OpType op, const char *f1, const char *f2) {
-    ThreadArgs *args = malloc(sizeof(ThreadArgs));
-    args->thread_id = id;
-    args->op = op;
-    strcpy(args->filename, f1);
-    if(f2) strcpy(args->arg2, f2);
-    pthread_create(t, NULL, file_worker, (void*)args);
+/* --- HELPER: Spawn Thread --- */
+void spawn(pthread_t *t, int id, OpType op, const char *f1, const char *f2) {
+    ThreadArgs *a = malloc(sizeof(ThreadArgs));
+    a->thread_id = id; a->op = op;
+    
+    strncpy(a->filename, f1, 255);
+    a->filename[255] = '\0';
+    
+    if (f2) {
+        strncpy(a->arg2, f2, 1023);
+        a->arg2[1023] = '\0';
+    }
+    
+    pthread_create(t, NULL, file_worker, a);
 }
 
+/* --- MAIN EXECUTION --- */
 int main() {
-    // Initialize Synchronization Locks
+    signal(SIGUSR1, handle_status_report);
     pthread_rwlock_init(&file_rwlock, NULL);
     pthread_mutex_init(&log_mutex, NULL);
 
-    pthread_t threads[10];
+    pthread_t t[10];
+    printf("--- G24 Project 2: Multi-threaded System ---\n\n");
 
-    printf("--- Multi-Threaded File Management System ---\n\n");
+    const char *data = "Project: Multi-threaded File Manager\nInstitution: IIT (ISM) Dhanbad\nDetails: This code demonstrates Readers-Writer locking, Signal handling, and direct Linux system calls.\n";
 
-    // TEST 1: Exclusive Write
-    create_thread(&threads[0], 1, OP_WRITE, "target.txt", "Initial file data.");
-    pthread_join(threads[0], NULL); // Wait for setup
+    // 1. Initial Write
+    spawn(&t[0], 1, OP_WRITE, "report.txt", data);
+    pthread_join(t[0], NULL);
 
-    // TEST 2: Concurrent Readers (These will run at the exact same time)
-    create_thread(&threads[1], 2, OP_READ, "target.txt", NULL);
-    create_thread(&threads[2], 3, OP_READ, "target.txt", NULL);
-    create_thread(&threads[3], 4, OP_READ, "target.txt", NULL);
-    
-    // TEST 3: Metadata and Copy
-    create_thread(&threads[4], 5, OP_META, "target.txt", NULL);
-    create_thread(&threads[5], 6, OP_COPY, "target.txt", "backup.txt");
+    // 2. Concurrent Ops (Read/Meta)
+    spawn(&t[1], 2, OP_READ, "report.txt", NULL);
+    spawn(&t[2], 3, OP_READ, "report.txt", NULL);
+    spawn(&t[3], 4, OP_META, "report.txt", NULL);
+    for(int i=1; i<4; i++) pthread_join(t[i], NULL);
 
-    // Wait for readers/metadata to finish before proceeding to destructive ops
-    for(int i = 1; i <= 5; i++) pthread_join(threads[i], NULL);
+    // 3. Management Ops
+    spawn(&t[4], 5, OP_COPY, "report.txt", "backup.txt");
+    pthread_join(t[4], NULL);
 
-    // TEST 4: Compress and Decompress
-    create_thread(&threads[6], 7, OP_COMPRESS, "target.txt", NULL);
-    pthread_join(threads[6], NULL);
-    
-    create_thread(&threads[7], 8, OP_DECOMPRESS, "target.txt", NULL);
-    pthread_join(threads[7], NULL);
+    spawn(&t[5], 6, OP_RENAME, "report.txt", "final_report.txt");
+    pthread_join(t[5], NULL);
 
-    // TEST 5: Rename and Delete
-    create_thread(&threads[8], 9, OP_RENAME, "target.txt", "old_target.txt");
-    pthread_join(threads[8], NULL);
+    // --- NEW: OPTIONAL DELETION STEP ---
+    char choice;
+    printf("\nBatch operations complete. Do you want to delete the generated files? (y/n): ");
+    scanf(" %c", &choice);
 
-    create_thread(&threads[9], 10, OP_DELETE, "old_target.txt", NULL);
-    pthread_join(threads[9], NULL);
+    if (choice == 'y' || choice == 'Y') {
+        printf("Cleaning up files...\n");
+        // Deleting the files created/renamed during the process
+        spawn(&t[6], 7, OP_DELETE, "backup.txt", NULL);
+        spawn(&t[7], 8, OP_DELETE, "final_report.txt", NULL);
+        
+        pthread_join(t[6], NULL);
+        pthread_join(t[7], NULL);
+    } else {
+        printf("Cleanup skipped. Files 'backup.txt' and 'final_report.txt' preserved.\n");
+    }
 
-    // Cleanup
     pthread_rwlock_destroy(&file_rwlock);
     pthread_mutex_destroy(&log_mutex);
-
-    printf("\n--- Simulation Complete. Check system.log for history. ---\n");
+    
+    printf("\nExecution Finished. Audit available in system.log\n");
     return 0;
 }
