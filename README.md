@@ -1,28 +1,24 @@
-# Multi-threaded File Management System
+# Multithreaded File Management System
+
+A high-performance, multithreaded file management service designed for Linux. This project implements a Client-Server Architecture using Shared Memory (SHM) for Inter-Process Communication and a Dynamic File Registry for fine-grained concurrency control.
 
 ## Overview
-An advanced multi-threaded file manager implemented in C using POSIX threads. The system ensures high-performance logical concurrency for reads while maintaining strict physical exclusivity for writes and archival operations.
+Originally inspired by kernel-level implementations in xv6, this project transitions those concepts into a robust Linux user-space service. It allows multiple independent processes to request file operations simultaneously while maintaining data integrity through synchronization.
 
-## Implemented Features
-* **Compression & Decompression:** Integrated user-optional archival tools using `gzip` and `gunzip` system calls.
-* **RW-Lock Concurrency:** Uses `pthread_rwlock` to facilitate multiple simultaneous readers without blocking.
-* **Management Suite:** Fully implemented `DELETE`, `RENAME`, `COPY`, and `META` (Inode/Size) operations.
-* **Asynchronous Status Monitoring:** Custom `SIGUSR1` handler for real-time health checks.
-* **Data Integrity:** Integrated `fsync()` calls to ensure kernel-level persistence.
-* **Thread-Safe Auditing:** Centralized `system.log` protected by mutex synchronization.
+## Core Architecture
+- **Shared-Memory Daemon:** A background process that monitors a shared memory queue and dispatches tasks to worker threads using POSIX Semaphores.
+- **Dynamic File Registry:** An in-memory registry that tracks active files. Each entry contains a `pthread_rwlock_t`, enabling Fine-Grained Locking.
+- **Reader-Writer Pattern:** Supports concurrent OP_READ and OP_META operations, while providing Mutual Exclusion for OP_WRITE, OP_DELETE, and OP_RENAME.
 
-## Execution Guide
-### Compilation
-```bash
-gcc filemanager.c -o file_manager -pthread
-```
+## Technical Stack
+| Feature | Technology |
+| :--- | :--- |
+| **IPC** | System V Shared Memory (`shmget`, `shmat`) + POSIX Semaphores |
+| **Threading** | POSIX Threads (`libpthread`) with detached execution |
+| **Sync** | `pthread_rwlock_t` (Per-file) and `sem_t` (IPC protection) |
+| **I/O** | Linux System Calls (`open`, `read`, `write`, `fsync`, `stat`, `unlink`) |
 
-### Running the System
-```bash
-./file_manager
-```
-
-## Technical Fixes
-* **Archival Logic:** Added logic for optional, user-prompted compression and decompression steps during execution.
-* **Buffer Stability:** Expanded `ThreadArgs` buffer to **1024 bytes** to resolve string truncation issues.
-* **Race Condition Mitigation:** Resolved terminal output conflicts using mutex-guarded logging.
+## Getting Started
+1. **Compile:** `make`
+2. **Run Daemon:** `./daemon`
+3. **Run Client:** `./client`
