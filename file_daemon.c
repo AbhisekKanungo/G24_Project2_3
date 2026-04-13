@@ -9,6 +9,7 @@
 #include <sys/ipc.h>
 #include <time.h>
 #include "common.h"
+#include <sys/syscall.h>
 
 #define MAX_FILES 100
 
@@ -52,10 +53,10 @@ void log_action(int client_pid, const char* op_name, const char* filename, const
         char time_str[64];
         strftime(time_str, sizeof(time_str), "%Y-%m-%d %H:%M:%S", localtime(&now));
 
-        pthread_t tid = pthread_self();
+        pid_t tid = syscall(SYS_gettid);
 
-        fprintf(log_file, "[%s] Thread ID: %lu | Client PID: %d | OP: %-8s | File: %-12s | Status: %s\n", 
-                time_str, (unsigned long)tid, client_pid, op_name, filename, status);
+        fprintf(log_file, "[%s] Thread ID: %d | Client PID: %d | OP: %-8s | File: %-12s | Status: %s\n", 
+        time_str, (int)tid, client_pid, op_name, filename, status);
         
         fclose(log_file);
     }
