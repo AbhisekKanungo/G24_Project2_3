@@ -64,6 +64,29 @@ void log_action(int client_pid, const char* op_name, const char* filename, const
     pthread_mutex_unlock(&log_mutex); // Unlock for the next thread
 }
 
+// Writes a Response struct to the client's named FIFO using their PID
+
+static void send_response(int client_pid, int success,
+                          const char* message, const char* data) {
+    char fifo_path[64];
+    get_fifo_path(client_pid, fifo_path, sizeof(fifo_path));
+
+    int fd = open(fifo_path, O_WRONLY | O_NONBLOCK);
+    if (fd < 0) return;
+
+    Response resp;
+    resp.success = success;
+    strncpy(resp.message, message, MAX_MSG - 1);
+    resp.message[MAX_MSG - 1] = '\0';
+    if (data)
+        strncpy(resp.data, data, MAX_DATA - 1);
+    else
+        resp.data[0] = '\0';
+
+    write(fd, &resp, sizeof(Response));
+    close(fd);
+}
+
 /* --- THE DAEMON WORKER THREAD --- */
 void* daemon_worker(void* arg) {
     Task* task = (Task*)arg;
@@ -86,8 +109,10 @@ void* daemon_worker(void* arg) {
                 close(fd);
                 printf("[Success] Wrote to %s\n", task->filename);
                 log_action(task->client_pid, "WRITE", task->filename, "Success");
+                send_response(task->client_pid, 1, "Write successful", NULL);
             } else {
                 log_action(task->client_pid, "WRITE", task->filename, "Failed");
+                send_response(task->client_pid, 0, "Write failed: could not open file", NULL);
             }
             pthread_rwlock_unlock(file_lock);
             break;
@@ -96,104 +121,119 @@ void* daemon_worker(void* arg) {
             pthread_rwlock_rdlock(file_lock);
             fd = open(task->filename, O_RDONLY);
             if (fd >= 0) {
-                printf("\n--- BEGIN %s ---\n", task->filename);
-                while((bytes = read(fd, buffer, sizeof(buffer))) > 0) write(STDOUT_FILENO, buffer, bytes);
-                printf("\n--- END %s ---\n", task->filename);
-                close(fd);
-                log_action(task->client_pid, "READ", task->filename, "Success");
+                char content[MAX_DATA] = {0};
+            ssize_t total = 0, bytes;
+            while ((bytes = read(fd, content + total,
+                                 sizeof(content) - total - 1)) > 0)
+                total += bytes;
+            close(fd);
+            content[total] = '\0';
+            log_action(task->client_pid, "READ", task->filename, "Success");
+            send_response(task->client_pid, 1, "Read successful", content);
             } else {
-                perror("Read failed");
                 log_action(task->client_pid, "READ", task->filename, "Failed");
+                send_response(task->client_pid, 0, "Read failed: file not found", NULL);
             }
             pthread_rwlock_unlock(file_lock);
             break;
 
         case OP_DELETE://Feature 2
             pthread_rwlock_wrlock(file_lock);
-            if (unlink(task->filename) == 0) {
-                printf("[Success] Deleted %s\n", task->filename);
-                log_action(task->client_pid, "DELETE", task->filename, "Success");
-            } else {
-                log_action(task->client_pid, "DELETE", task->filename, "Failed");
-            }
-            pthread_rwlock_unlock(file_lock);
-            break;
+        if (unlink(task->filename) == 0) {
+            log_action(task->client_pid, "DELETE", task->filename, "Success");
+            send_response(task->client_pid, 1, "File deleted", NULL);
+        } else {
+            log_action(task->client_pid, "DELETE", task->filename, "Failed");
+            send_response(task->client_pid, 0, "Delete failed: file not found", NULL);
+        }
+        pthread_rwlock_unlock(file_lock);
+        break;
 
         case OP_META://Feature 5
             pthread_rwlock_rdlock(file_lock);
-            if (stat(task->filename, &st) == 0) { 
-                char time_buf[100];
-                strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M:%S", localtime(&st.st_ctime));
-
-                printf("\n--- Metadata for: %s ---\n", task->filename);
-                printf("Size:        %ld bytes\n", (long)st.st_size);
-                printf("Inode:       %ld\n", (long)st.st_ino);
-                printf("Permissions: %o (Octal)\n", st.st_mode & 0777);
-                printf("Status Date: %s\n", time_buf);
-                printf("---------------------------\n");
-                log_action(task->client_pid, "META", task->filename, "Success");
-            } else {
-                printf("[Error] Metadata failed: %s not found.\n", task->filename);
-                log_action(task->client_pid, "META", task->filename, "Failed");
-            }
-            pthread_rwlock_unlock(file_lock); 
-            break;
+        if (stat(task->filename, &st) == 0) {
+            char time_buf[64], msg[MAX_MSG];
+            strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M:%S",
+                     localtime(&st.st_ctime));
+            snprintf(msg, sizeof(msg),
+                     "Size: %ld bytes | Inode: %ld | Perms: %o | Modified: %s",
+                     (long)st.st_size, (long)st.st_ino,
+                     st.st_mode & 0777, time_buf);
+            log_action(task->client_pid, "META", task->filename, "Success");
+            send_response(task->client_pid, 1, msg, NULL);
+        } else {
+            log_action(task->client_pid, "META", task->filename, "Failed");
+            send_response(task->client_pid, 0, "Meta failed: file not found", NULL);
+        }
+        pthread_rwlock_unlock(file_lock);
+        break;
 
         case OP_COMPRESS://Feature 6
-            pthread_rwlock_rdlock(file_lock);
-            snprintf(cmd, sizeof(cmd), "gzip -k -f %s", task->filename);
-            if (system(cmd) == 0) {
-                printf("[Success] Compressed %s\n", task->filename);
-                log_action(task->client_pid, "COMPRESS", task->filename, "Success");
+           pthread_rwlock_rdlock(file_lock);
+           snprintf(cmd, sizeof(cmd), "gzip -k -f %s", task->filename);
+           if (system(cmd) == 0) {
+            char msg[MAX_MSG];
+            snprintf(msg, sizeof(msg), "Compressed -> %s.gz", task->filename);
+            log_action(task->client_pid, "COMPRESS", task->filename, "Success");
+            send_response(task->client_pid, 1, msg, NULL);
             } else {
-                log_action(task->client_pid, "COMPRESS", task->filename, "Failed");
-            }
-            pthread_rwlock_unlock(file_lock);
-            break;
+            log_action(task->client_pid, "COMPRESS", task->filename, "Failed");
+            send_response(task->client_pid, 0, "Compression failed", NULL);
+           }
+           pthread_rwlock_unlock(file_lock);
+           break;
 
         case OP_DECOMPRESS://Feature 7
             pthread_rwlock_wrlock(file_lock);
             snprintf(cmd, sizeof(cmd), "gunzip -k -f %s", task->filename);
             if (system(cmd) == 0) {
-                printf("[Success] Decompressed %s\n", task->filename);
-                log_action(task->client_pid, "DECOMPRESS", task->filename, "Success");
+            log_action(task->client_pid, "DECOMPRESS", task->filename, "Success");
+            send_response(task->client_pid, 1, "Decompressed successfully", NULL);
             } else {
-                log_action(task->client_pid, "DECOMPRESS", task->filename, "Failed");
+            log_action(task->client_pid, "DECOMPRESS", task->filename, "Failed");
+            send_response(task->client_pid, 0, "Decompression failed", NULL);
             }
             pthread_rwlock_unlock(file_lock);
             break;
-
+            
         case OP_COPY://Feature 4
-            pthread_rwlock_rdlock(file_lock);
-            fd = open(task->filename, O_RDONLY);
-            fd2 = open(task->arg2, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-            if (fd >= 0 && fd2 >= 0) {
-                while ((bytes = read(fd, buffer, sizeof(buffer))) > 0) write(fd2, buffer, bytes);
-                close(fd); close(fd2);
-                printf("[Success] Copied %s to %s\n", task->filename, task->arg2);
-                log_action(task->client_pid, "COPY", task->filename, "Success");
-            } else {
-                if (fd >= 0) close(fd);
-                if (fd2 >= 0) close(fd2);
-                log_action(task->client_pid, "COPY", task->filename, "Failed");
-            }
-            pthread_rwlock_unlock(file_lock);
-            break;
+           pthread_rwlock_rdlock(file_lock);
+           fd  = open(task->filename, O_RDONLY);
+           fd2 = open(task->arg2, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+           if (fd >= 0 && fd2 >= 0) {
+            while ((bytes = read(fd, buffer, sizeof(buffer))) > 0)
+                write(fd2, buffer, bytes);
+            close(fd); close(fd2);
+            char msg[MAX_MSG];
+            snprintf(msg, sizeof(msg), "Copied to %s", task->arg2);
+            log_action(task->client_pid, "COPY", task->filename, "Success");
+            send_response(task->client_pid, 1, msg, NULL);
+           } else {
+            if (fd  >= 0) close(fd);
+            if (fd2 >= 0) close(fd2);
+            log_action(task->client_pid, "COPY", task->filename, "Failed");
+            send_response(task->client_pid, 0, "Copy failed", NULL);
+        }
+        pthread_rwlock_unlock(file_lock);
+        break;
 
         case OP_RENAME://Feature 3
             pthread_rwlock_wrlock(file_lock);
-            if (rename(task->filename, task->arg2) == 0) {
-                printf("[Success] Renamed to %s\n", task->arg2);
-                log_action(task->client_pid, "RENAME", task->filename, "Success");
-            } else {
-                log_action(task->client_pid, "RENAME", task->filename, "Failed");
-            }
-            pthread_rwlock_unlock(file_lock);
-            break;
-    }
+        if (rename(task->filename, task->arg2) == 0) {
+            char msg[MAX_MSG];
+            snprintf(msg, sizeof(msg), "Renamed to %s", task->arg2);
+            log_action(task->client_pid, "RENAME", task->filename, "Success");
+            send_response(task->client_pid, 1, msg, NULL);
+        } else {
+            log_action(task->client_pid, "RENAME", task->filename, "Failed");
+            send_response(task->client_pid, 0, "Rename failed", NULL);
+        }
+        pthread_rwlock_unlock(file_lock);
+        break;
     
     free(task);
     return NULL;
+   }
 }
 
 int main() {
