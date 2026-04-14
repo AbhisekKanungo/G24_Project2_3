@@ -8,7 +8,13 @@ Originally inspired by kernel-level implementations in xv6, this project transit
 ## Core Architecture
 - **Shared-Memory Daemon:** A background process that monitors a shared memory queue and dispatches tasks to worker threads using POSIX Semaphores.
 - **Dynamic File Registry:** An in-memory registry that tracks active files. Each entry contains a `pthread_rwlock_t`, enabling Fine-Grained Locking.
-- **Reader-Writer Pattern:** Supports concurrent OP_READ and OP_META operations, while providing Mutual Exclusion for OP_WRITE, OP_DELETE, and OP_RENAME.
+- **Reader-Writer Pattern:** Supports concurrent OP_READ, OP_META, and OP_COMPRESS operations, while enforcing Mutual Exclusion for OP_WRITE, OP_DELETE, OP_RENAME, and OP_DECOMPRESS.
+
+## Supported Features
+- **Read / Write:** High-throughput concurrent reading and safe, exclusive writing.
+-**File Management:** Copy, rename, and delete files without race conditions.
+-**Metadata Retrieval:** Instantly fetch file size, inode, and permission statistics.
+-**Compression / Decompression:** Native integration with system utilities to shrink and expand files (.gz) directly via client requests.
 
 ## Technical Stack
 | Feature | Technology |
