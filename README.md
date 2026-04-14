@@ -16,6 +16,15 @@ Originally inspired by kernel-level implementations in xv6, this project transit
 - **Metadata Retrieval:** Instantly fetch file size, inode, and permission statistics.
 - **Compression / Decompression:** Native integration with system utilities to shrink and expand files (.gz) directly via client requests.
 
+## Bidirectional IPC Enhancement (Advanced Feature)
+- Added Response struct and get_fifo_path() helper to common.h
+- Client creates a named FIFO before sending each task and blocks
+  on it to receive the daemon's result inline
+- Daemon worker threads write structured Response back to client
+  after every operation using O_NONBLOCK to avoid hanging
+- Clients now see success/failure and file content in their own
+  terminal without monitoring the daemon window"
+
 ## Technical Stack
 | Feature | Technology |
 | :--- | :--- |

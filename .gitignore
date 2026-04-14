@@ -1,0 +1,12 @@
+# Ignore binaries
+client
+daemon
+
+# Ignore logs
+*.log
+
+# Ignore temp/test files
+*.txt
+
+# VS Code settings
+.vscode/

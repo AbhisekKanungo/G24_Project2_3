@@ -4,6 +4,8 @@
 #include <unistd.h>
 #include <sys/shm.h>
 #include <sys/ipc.h>
+#include <fcntl.h>
+#include <sys/stat.h>
 #include "common.h"
 
 void clear_input() {
@@ -18,6 +20,11 @@ int main() {
         return 1;
     }
     SharedQueue* q = (SharedQueue*)shmat(id, NULL, 0);
+
+    // Create per-PID response FIFO
+   char fifo_path[64];
+   get_fifo_path(getpid(), fifo_path, sizeof(fifo_path));
+   mkfifo(fifo_path, 0666);
 
     int choice;
     char f1[MAX_FILENAME], f2[MAX_DATA];
@@ -64,9 +71,33 @@ int main() {
         sem_post(&q->mutex);
         sem_post(&q->full);
 
-        printf("\n[✓] Sent Op %d to Daemon. Check daemon terminal for results.\n", choice);
-    }
+        // printf("\n[✓] Sent Op %d to Daemon. Check daemon terminal for results.\n", choice);
 
+    // Wait for daemon's response
+
+    printf("[~] Waiting for daemon response...\n");
+    int fd = open(fifo_path, O_RDONLY);
+    if (fd < 0) {
+    perror("Could not open response FIFO");
+    continue;
+   }
+   Response resp;
+   ssize_t n = read(fd, &resp, sizeof(Response));
+   close(fd);
+
+   if (n == sizeof(Response)) {
+    if (resp.success)
+        printf("[✓] Success: %s\n", resp.message);
+    else
+        printf("[✗] Failed:  %s\n", resp.message);
+    if (resp.data[0] != '\0')
+        printf("%s\n", resp.data);
+    } else {
+    printf("[!] Malformed response from daemon.\n");
+    }
+    }
+     
+    unlink(fifo_path); // clean up FIFO on exit
     shmdt(q);
     printf("Goodbye!\n");
     return 0;
