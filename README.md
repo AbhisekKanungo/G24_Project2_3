@@ -12,9 +12,9 @@ Originally inspired by kernel-level implementations in xv6, this project transit
 
 ## Supported Features
 - **Read / Write:** High-throughput concurrent reading and safe, exclusive writing.
--**File Management:** Copy, rename, and delete files without race conditions.
--**Metadata Retrieval:** Instantly fetch file size, inode, and permission statistics.
--**Compression / Decompression:** Native integration with system utilities to shrink and expand files (.gz) directly via client requests.
+- **File Management:** Copy, rename, and delete files without race conditions.
+- **Metadata Retrieval:** Instantly fetch file size, inode, and permission statistics.
+- **Compression / Decompression:** Native integration with system utilities to shrink and expand files (.gz) directly via client requests.
 
 ## Technical Stack
 | Feature | Technology |
