@@ -1,4 +1,3 @@
-file_daemon.c code
 #include <stdio.h>
 #include <stdlib.h>
 #include <pthread.h>
@@ -24,7 +23,7 @@ int registry_count = 0;
 pthread_mutex_t registry_mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t log_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-/* 🔥 NEW: Performance Stats */
+/* NEW: Performance Stats */
 long total_operations = 0;
 double total_time = 0.0;
 pthread_mutex_t stats_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -49,7 +48,7 @@ pthread_rwlock_t* get_file_lock(const char* filename) {
     return lock;
 }
 
-/* 🔥 Enhanced logging */
+/* Enhanced logging */
 void log_action(int pid, const char* op, const char* file, const char* status, double time_taken) {
     pthread_mutex_lock(&log_mutex);
 
@@ -160,7 +159,7 @@ void* daemon_worker(void* arg) {
         }
     }
 
-    /* 🔥 Time calculation */
+    /* Time calculation */
     struct timespec end;
     clock_gettime(CLOCK_MONOTONIC, &end);
 
@@ -178,7 +177,7 @@ void* daemon_worker(void* arg) {
                success ? "Success" : "Failed",
                time_taken);
 
-    /* 🔥 NEW: Update stats */
+    /* NEW: Update stats */
     pthread_mutex_lock(&stats_mutex);
     total_operations++;
     total_time += time_taken;
